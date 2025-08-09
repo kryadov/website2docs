@@ -1,0 +1,6 @@
+requests>=2.31.0
+beautifulsoup4>=4.12.2
+lxml>=5.2.1
+python-docx>=0.8.11
+odfpy>=1.4.1
+reportlab>=4.0.4
