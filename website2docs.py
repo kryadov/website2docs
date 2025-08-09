@@ -627,7 +627,7 @@ def save_as_pdf(pages: List[PageContent], output_path: str, start_url: str, orie
     try:
         from reportlab.lib.pagesizes import A4, landscape, portrait
         from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle, Preformatted
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle, Preformatted, KeepInFrame
         from reportlab.lib.units import cm
         from reportlab.lib import fonts, colors
         from reportlab.lib.styles import ParagraphStyle
@@ -644,6 +644,7 @@ def save_as_pdf(pages: List[PageContent], output_path: str, start_url: str, orie
     small = styles["Normal"]
     small.fontSize = 9
     code_style = ParagraphStyle('Code', parent=styles['BodyText'], fontName='Courier', fontSize=9, leading=11)
+    table_cell_style = ParagraphStyle('TableCell', parent=styles['BodyText'], fontSize=9, leading=11)
 
     story = []
 
@@ -700,8 +701,13 @@ def save_as_pdf(pages: List[PageContent], output_path: str, start_url: str, orie
                 if data:
                     try:
                         img = RLImage(io.BytesIO(data))
-                        img._restrictSize(16 * cm, 20 * cm)
-                        story.append(img)
+                        # Scale image to fit within the available frame size so it can always
+                        # fit on a fresh page even if it doesn't fit in the remaining space.
+                        max_w, max_h = doc.width, doc.height
+                        img._restrictSize(max_w, max_h)
+                        # Wrap image in KeepInFrame so it shrinks to available space if needed
+                        kif_img = KeepInFrame(maxWidth=doc.width, maxHeight=doc.height, content=[img], mode='shrink')
+                        story.append(kif_img)
                         story.append(Spacer(1, 0.1 * cm))
                     except Exception:
                         alt = blk.get("alt") or "[image]"
@@ -712,8 +718,20 @@ def save_as_pdf(pages: List[PageContent], output_path: str, start_url: str, orie
             elif btype == "table":
                 rows: List[List[str]] = blk.get("rows", [])
                 if rows:
-                    data = [[safe(cell) for cell in row] for row in rows]
-                    t = Table(data)
+                    # Convert cell text to Paragraphs to enable wrapping
+                    para_rows: List[List[Paragraph]] = []
+                    max_cols = max(len(r) for r in rows)
+                    for row in rows:
+                        para_row: List[Paragraph] = []
+                        for cell in row:
+                            para_row.append(Paragraph(safe(cell), table_cell_style))
+                        # Pad short rows to consistent column count
+                        while len(para_row) < max_cols:
+                            para_row.append(Paragraph("", table_cell_style))
+                        para_rows.append(para_row)
+                    # Distribute columns across available width
+                    col_widths = [doc.width / max_cols for _ in range(max_cols)]
+                    t = Table(para_rows, colWidths=col_widths)
                     t.setStyle(TableStyle([
                         ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
                         ("BOX", (0, 0), (-1, -1), 0.25, colors.grey),
@@ -723,7 +741,9 @@ def save_as_pdf(pages: List[PageContent], output_path: str, start_url: str, orie
                         ("TOPPADDING", (0, 0), (-1, -1), 2),
                         ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
                     ]))
-                    story.append(t)
+                    # Ensure the table never exceeds a frame; shrink if needed (e.g., very tall row)
+                    kif = KeepInFrame(maxWidth=doc.width, maxHeight=doc.height, content=[t], mode='shrink')
+                    story.append(kif)
                     story.append(Spacer(1, 0.1 * cm))
 
     doc.build(story)
