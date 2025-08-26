@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-website2docs - Crawl a website and export its content to PDF, DOCX, or ODT.
+website2docs - Crawl a website and export its content to PDF, DOCX, ODT, HTML or Markdown.
 
 Usage (examples):
   python website2docs.py --url https://example.com --format pdf --output example.pdf
   python website2docs.py -u https://example.com -f docx
   python website2docs.py -u https://example.com -f odt --max-pages 200 --max-depth 3
+  python website2docs.py -u https://example.com -f html
+  python website2docs.py -u https://example.com -f md
 
 Notes:
 - The crawler follows only HTTP(S) links within the same domain as the start URL.
@@ -749,6 +751,123 @@ def save_as_pdf(pages: List[PageContent], output_path: str, start_url: str, orie
     doc.build(story)
 
 
+def save_as_html(pages: List[PageContent], output_path: str, start_url: str, **kwargs) -> None:
+    """Saves the crawled content as a single HTML file."""
+    import html
+    
+    parts = []
+    parts.append("<!DOCTYPE html>")
+    parts.append("<html><head>")
+    parts.append(f"<title>Website export: {html.escape(start_url)}</title>")
+    parts.append("<meta charset=\"utf-8\">")
+    parts.append("<style>body { font-family: sans-serif; } img { max-width: 100%; height: auto; } table { border-collapse: collapse; } td, th { border: 1px solid #ccc; padding: 4px; } </style>")
+    parts.append("</head><body>")
+    parts.append(f"<h1>Website export: {html.escape(start_url)}</h1>")
+    parts.append(f"<p>Generated on: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>")
+
+    for page in pages:
+        parts.append("<hr>")
+        parts.append(f"<h2>{html.escape(page.title or 'Untitled')}</h2>")
+        parts.append(f"<p><em>Source: <a href=\"{html.escape(page.url)}\">{html.escape(page.url)}</a></em></p>")
+        
+        blocks: List[dict] = []
+        if getattr(page, "html", ""):
+            try:
+                blocks = extract_blocks(page.html, base_url=page.url)
+            except Exception:
+                blocks = []
+
+        if not blocks:
+            for para in _split_paragraphs(page.text):
+                parts.append(f"<p>{html.escape(para)}</p>")
+            continue
+
+        for blk in blocks:
+            btype = blk.get("type")
+            if btype == "heading":
+                lvl = int(blk.get("level", 2))
+                parts.append(f"<h{lvl+1}>{html.escape(blk.get('text', ''))}</h{lvl+1}>")
+            elif btype == "paragraph":
+                parts.append(f"<p>{html.escape(blk.get('text', ''))}</p>")
+            elif btype == "list":
+                tag = "ol" if blk.get("ordered") else "ul"
+                parts.append(f"<{tag}>")
+                for item in blk.get("items", []):
+                    parts.append(f"<li>{html.escape(item)}</li>")
+                parts.append(f"</{tag}>")
+            elif btype == "code":
+                parts.append(f"<pre><code>{html.escape(blk.get('text', ''))}</code></pre>")
+            elif btype == "image":
+                alt_text = html.escape(blk.get('alt', ''))
+                parts.append(f"<img src=\"{html.escape(blk.get('src', ''))}\" alt=\"{alt_text}\">")
+            elif btype == "table":
+                parts.append("<table>")
+                rows: List[List[str]] = blk.get("rows", [])
+                for row in rows:
+                    parts.append("<tr>")
+                    for cell in row:
+                        parts.append(f"<td>{html.escape(cell)}</td>")
+                    parts.append("</tr>")
+                parts.append("</table>")
+
+    parts.append("</body></html>")
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(parts))
+
+
+def save_as_markdown(pages: List[PageContent], output_path: str, start_url: str, **kwargs) -> None:
+    """Saves the crawled content as a single Markdown file."""
+    parts = []
+    parts.append(f"# Website export: {start_url}")
+    parts.append(f"Generated on: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    for page in pages:
+        parts.append("\n---\n")
+        parts.append(f"## {page.title or 'Untitled'}")
+        parts.append(f"*{page.url}*")
+        
+        blocks: List[dict] = []
+        if getattr(page, "html", ""):
+            try:
+                blocks = extract_blocks(page.html, base_url=page.url)
+            except Exception:
+                blocks = []
+
+        if not blocks:
+            for para in _split_paragraphs(page.text):
+                parts.append(para)
+            continue
+
+        for blk in blocks:
+            btype = blk.get("type")
+            if btype == "heading":
+                lvl = int(blk.get("level", 2))
+                parts.append(f"{'#' * (lvl + 1)} {blk.get('text', '')}")
+            elif btype == "paragraph":
+                parts.append(blk.get("text", ''))
+            elif btype == "list":
+                prefix = "1. " if blk.get("ordered") else "* "
+                for item in blk.get("items", []):
+                    parts.append(f"{prefix}{item}")
+            elif btype == "code":
+                parts.append(f"```\n{blk.get('text', '')}\n```")
+            elif btype == "image":
+                parts.append(f"![{blk.get('alt', '')}]({blk.get('src', '')})")
+            elif btype == "table":
+                rows: List[List[str]] = blk.get("rows", [])
+                if rows:
+                    header = "| " + " | ".join(rows[0]) + " |"
+                    divider = "| " + " | ".join(["---"] * len(rows[0])) + " |"
+                    parts.append(header)
+                    parts.append(divider)
+                    for row in rows[1:]:
+                        parts.append("| " + " | ".join(row) + " |")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n\n".join(parts))
+
+
 # ============== CLI ==============
 
 def guess_format_from_extension(path: str) -> Optional[str]:
@@ -759,13 +878,17 @@ def guess_format_from_extension(path: str) -> Optional[str]:
         return "docx"
     if path.endswith(".odt"):
         return "odt"
+    if path.endswith((".html", ".htm")):
+        return "html"
+    if path.endswith(".md"):
+        return "md"
     return None
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Crawl a website and export its content to PDF, DOCX, or ODT.")
+    p = argparse.ArgumentParser(description="Crawl a website and export its content to PDF, DOCX, ODT, HTML, or Markdown.")
     p.add_argument("--url", "-u", required=True, help="Start URL (e.g., https://example.com)")
-    p.add_argument("--format", "-f", choices=["pdf", "docx", "odt"], help="Output format. If omitted, inferred from --output extension.")
+    p.add_argument("--format", "-f", choices=["pdf", "docx", "odt", "html", "md"], help="Output format. If omitted, inferred from --output extension.")
     p.add_argument("--output", "-o", help="Output file path. If omitted, a name is derived from the domain and format.")
     p.add_argument("--max-pages", type=int, default=100, help="Maximum number of pages to crawl (0 = unlimited). Default: 100")
     p.add_argument("--max-depth", type=int, default=2, help="Maximum crawl depth (0 = only the start page). Default: 2")
@@ -773,7 +896,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--user-agent", default=USER_AGENT, help=f"User-Agent header. Default: {USER_AGENT}")
     p.add_argument("--keep-query", action="store_true", help="Do not strip query strings from URLs (may increase duplicates).")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"HTTP request timeout in seconds. Default: {DEFAULT_TIMEOUT}")
-    p.add_argument("--orientation", choices=["portrait", "landscape"], default="portrait", help="Page orientation for output: portrait (default) or landscape.")
+    p.add_argument("--orientation", choices=["portrait", "landscape"], default="portrait", help="Page orientation for PDF/DOCX/ODT output: portrait (default) or landscape.")
     return p.parse_args(argv)
 
 
@@ -823,6 +946,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         save_as_odt(pages, output_path, start_url=args.url, orientation=args.orientation)
     elif output_format == "pdf":
         save_as_pdf(pages, output_path, start_url=args.url, orientation=args.orientation)
+    elif output_format == "html":
+        save_as_html(pages, output_path, start_url=args.url, orientation=args.orientation)
+    elif output_format == "md":
+        save_as_markdown(pages, output_path, start_url=args.url, orientation=args.orientation)
     else:  # pragma: no cover
         print(f"Unsupported format: {output_format}", file=sys.stderr)
         return 2
