@@ -89,6 +89,130 @@ def is_same_domain(start_url: str, other_url: str) -> bool:
     return a == b
 
 
+def extract_confluence_info(url: str) -> Tuple[Optional[str], Optional[str]]:
+    """Extract domain and page ID from a Confluence URL."""
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return None, None
+    domain = f"{parsed.scheme}://{parsed.netloc}"
+    if not parsed.netloc.endswith(".atlassian.net"):
+        return domain, None
+
+    # Try to find pageId in query (e.g., viewpage.action?pageId=123)
+    from urllib.parse import parse_qs
+    qs = parse_qs(parsed.query)
+    if "pageId" in qs:
+        return domain, qs["pageId"][0]
+
+    # Try to find in path: /wiki/spaces/KEY/pages/12345/Title
+    match = re.search(r"/pages/(\d+)", parsed.path)
+    if match:
+        return domain, match.group(1)
+
+    return domain, None
+
+
+def crawl_confluence(
+    start_url: str,
+    email: str,
+    token: str,
+    max_depth: int = 2,
+    max_pages: int = 100,
+    delay: float = 0.0,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> List[PageContent]:
+    """Crawl Confluence using REST API v2."""
+    try:
+        import requests
+    except Exception as e:
+        raise RuntimeError("requests is required for Confluence mode. Install with: pip install requests") from e
+
+    domain, start_page_id = extract_confluence_info(start_url)
+    if not start_page_id:
+        print(f"[website2docs] Could not extract Page ID from {start_url}", file=sys.stderr)
+        return []
+
+    auth = (email, token)
+    q: deque[Tuple[str, int]] = deque([(start_page_id, 0)])
+    seen: Set[str] = set()
+    results: List[PageContent] = []
+
+    while q and (max_pages <= 0 or len(results) < max_pages):
+        page_id, depth = q.popleft()
+        if page_id in seen:
+            continue
+        seen.add(page_id)
+
+        # Fetch page content
+        # API v2: /wiki/api/v2/pages/{id}?body-format=storage
+        api_url = f"{domain}/wiki/api/v2/pages/{page_id}?body-format=storage"
+        try:
+            resp = requests.get(api_url, auth=auth, timeout=timeout)
+            if resp.status_code != 200:
+                print(f"[website2docs] Failed to fetch page {page_id}: {resp.status_code}")
+                continue
+
+            data = resp.json()
+            title = data.get("title", f"Page {page_id}")
+            body_storage = data.get("body", {}).get("storage", {}).get("value", "")
+
+            # Confluence Storage format is XHTML.
+            # We can use our existing extract_text_and_title to get plain text.
+            _, text = extract_text_and_title(body_storage)
+
+            # Optional: handle images by converting them to data URIs
+            # to preserve auth when saving to DOCX/PDF later.
+            if body_storage:
+                try:
+                    from bs4 import BeautifulSoup
+                    import base64
+                    soup = BeautifulSoup(body_storage, "lxml")
+                    img_tags = soup.find_all("img")
+                    for img in img_tags:
+                        src = img.get("src")
+                        if src:
+                            # resolve relative URLs
+                            if src.startswith("/"):
+                                src = f"{domain}{src}"
+                            try:
+                                i_resp = requests.get(src, auth=auth, timeout=timeout)
+                                if i_resp.status_code == 200:
+                                    content_type = i_resp.headers.get("Content-Type", "image/png")
+                                    encoded = base64.b64encode(i_resp.content).decode("utf-8")
+                                    img["src"] = f"data:{content_type};base64,{encoded}"
+                            except Exception:
+                                pass
+                    body_storage = str(soup)
+                except Exception:
+                    pass
+
+            results.append(PageContent(
+                url=f"{domain}/wiki/pages/viewpage.action?pageId={page_id}",
+                title=title,
+                text=text,
+                html=body_storage
+            ))
+
+            if depth < max_depth:
+                # Get children
+                # API v2: /wiki/api/v2/pages/{id}/children
+                child_url = f"{domain}/wiki/api/v2/pages/{page_id}/children"
+                child_resp = requests.get(child_url, auth=auth, timeout=timeout)
+                if child_resp.status_code == 200:
+                    children = child_resp.json().get("results", [])
+                    for child in children:
+                        child_id = child.get("id")
+                        if child_id and child_id not in seen:
+                            q.append((child_id, depth + 1))
+        except Exception as e:
+            print(f"[website2docs] Error processing Confluence page {page_id}: {e}")
+
+        if delay > 0:
+            time.sleep(delay)
+
+    return results
+
+
 def extract_links(html: str, base_url: str, keep_query: bool = False) -> List[str]:
     try:
         from bs4 import BeautifulSoup
@@ -897,6 +1021,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--keep-query", action="store_true", help="Do not strip query strings from URLs (may increase duplicates).")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"HTTP request timeout in seconds. Default: {DEFAULT_TIMEOUT}")
     p.add_argument("--orientation", choices=["portrait", "landscape"], default="portrait", help="Page orientation for PDF/DOCX/ODT output: portrait (default) or landscape.")
+    p.add_argument("--confluence-email", help="Email for Confluence Cloud HTTP Basic Auth.")
+    p.add_argument("--confluence-token", help="API Token for Confluence Cloud HTTP Basic Auth.")
     return p.parse_args(argv)
 
 
@@ -924,15 +1050,28 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print(f"[website2docs] Starting crawl: {args.url}")
     print(f"[website2docs] Max pages: {args.max_pages} | Max depth: {args.max_depth} | Delay: {args.delay}s")
-    pages = crawl(
-        start_url=args.url,
-        max_depth=args.max_depth,
-        max_pages=args.max_pages,
-        delay=args.delay,
-        user_agent=args.user_agent,
-        keep_query=args.keep_query,
-        timeout=args.timeout,
-    )
+
+    if args.confluence_email and args.confluence_token:
+        print("[website2docs] Using Confluence Cloud REST API mode.")
+        pages = crawl_confluence(
+            start_url=args.url,
+            email=args.confluence_email,
+            token=args.confluence_token,
+            max_depth=args.max_depth,
+            max_pages=args.max_pages,
+            delay=args.delay,
+            timeout=args.timeout,
+        )
+    else:
+        pages = crawl(
+            start_url=args.url,
+            max_depth=args.max_depth,
+            max_pages=args.max_pages,
+            delay=args.delay,
+            user_agent=args.user_agent,
+            keep_query=args.keep_query,
+            timeout=args.timeout,
+        )
 
     if not pages:
         print("No pages were fetched. Exiting.", file=sys.stderr)

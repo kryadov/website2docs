@@ -43,6 +43,20 @@ python website2docs.py -u https://example.com
 python website2docs.py -u https://example.com -f odt --max-pages 200 --max-depth 3
 ```
 
+### Confluence Cloud Mode
+Download content from Atlassian Confluence Cloud using the REST API. This requires an Email and an API Token (HTTP Basic Auth).
+```bash
+python website2docs.py \
+  --url https://your-domain.atlassian.net/wiki/spaces/SPACE/pages/123456/Page+Title \
+  --confluence-email your-email@example.com \
+  --confluence-token YOUR_API_TOKEN \
+  --format pdf
+```
+This mode:
+- Uses the Confluence REST API v2 instead of HTML scraping.
+- Downloads the page and its children recursively (respecting `--max-depth` and `--max-pages`).
+- Preserves images by embedding them as data URIs using your credentials.
+
 Behavior notes:
 - If `--format` is omitted but `--output` is provided, the format is inferred from the output extension.
 - If both `--format` and `--output` are omitted, the format defaults to DOCX and the output file name is derived from the domain: `<domain>.<fmt>` (e.g., `example.com.docx`).
@@ -58,6 +72,8 @@ All options:
 - `--keep-query` (flag): Do not strip query strings from URLs (may increase duplicates).
 - `--timeout` (int, default `15`): HTTP request timeout in seconds.
 - `--orientation {portrait, landscape}`: Page orientation for output. Default: `portrait`. 
+- `--confluence-email`: Email for Confluence Cloud HTTP Basic Auth.
+- `--confluence-token`: API Token for Confluence Cloud HTTP Basic Auth.
 
 Program output includes progress logs, e.g.:
 ```
